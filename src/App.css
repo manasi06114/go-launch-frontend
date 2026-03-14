@@ -1,12 +1,15 @@
-.landing-shell {
-  background:
-    radial-gradient(circle at 20% 20%, rgba(20, 184, 166, 0.2), transparent 30%),
-    radial-gradient(circle at 80% 10%, rgba(99, 102, 241, 0.2), transparent 26%),
-    linear-gradient(180deg, #090f1e 0%, #111b2d 68%, #f8fafc 68.2%);
+/* Spin animation for loading states */
+@keyframes spin-slow {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
-.page-shell {
-  background:
-    radial-gradient(circle at top right, rgba(20, 184, 166, 0.08), transparent 24%),
-    linear-gradient(180deg, #f8fafc 0%, #f1f5f9 100%);
+/* Floating glow pulse */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 0.15; }
+  50% { opacity: 0.25; }
+}
+
+.glow-orb {
+  animation: glow-pulse 4s ease-in-out infinite;
 }

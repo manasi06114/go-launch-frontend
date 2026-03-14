@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -7,14 +7,12 @@
 @layer base {
   :root {
     font-family: 'Plus Jakarta Sans', sans-serif;
-    color: #d8e2f2;
-    background:
-      radial-gradient(circle at top, rgba(94, 234, 212, 0.12), transparent 35%),
-      linear-gradient(180deg, #08111f 0%, #0d1827 42%, #eef3f6 42.5%, #f6f8fb 100%);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
   body {
-    @apply m-0 min-h-screen bg-transparent text-slate-900 antialiased;
+    @apply m-0 min-h-screen bg-zinc-950 text-zinc-100;
   }
 
   #root {
@@ -31,37 +29,29 @@
   select {
     font: inherit;
   }
+
+  /* Thin, refined scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.12);
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.2);
+  }
 }
 
-@layer components {
-  .app-card {
-    @apply rounded-[28px] border border-white/10 bg-white/80 p-6 shadow-[0_24px_80px_rgba(8,17,31,0.08)] backdrop-blur;
-  }
-
-  .glass-panel {
-    @apply rounded-[32px] border border-white/10 bg-slate-950/55 shadow-[0_24px_90px_rgba(8,17,31,0.45)] backdrop-blur;
-  }
-
-  .hero-grid {
-    background-image:
-      linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
-    background-size: 48px 48px;
-  }
-
-  .field-label {
-    @apply mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500;
-  }
-
-  .field-input {
-    @apply w-full rounded-2xl border border-slate-200 bg-white/80 px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-200/60;
-  }
-
-  .metric-card {
-    @apply rounded-[28px] border border-white/10 bg-slate-950/95 p-5 text-white shadow-[0_18px_60px_rgba(8,17,31,0.28)];
-  }
-
-  .section-title {
-    @apply text-sm font-semibold uppercase tracking-[0.18em] text-slate-400;
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
   }
 }
