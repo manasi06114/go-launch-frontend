@@ -23,6 +23,7 @@ import {
   BrowserRouter,
   NavLink,
   Navigate,
+  Outlet,
   Route,
   Routes,
   useLocation,
@@ -30,11 +31,19 @@ import {
   useParams,
 } from 'react-router-dom'
 import { fetchHealth, generateReport, getReport, listReports, submitFeedback } from './api'
+import {
+  loginWithEmail,
+  logout,
+  signupWithEmail,
+  subscribeToAuthState,
+} from './auth'
 import type {
   AnalysisReport,
   AnalysisReportCard,
   AnalysisRequest,
   FeedbackPayload,
+  SourcePlatform,
+  SourceReference,
 } from './types'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -59,6 +68,8 @@ type WizardFormState = {
 }
 
 type FormErrors = Partial<Record<keyof WizardFormState, string>>
+
+type AuthMode = 'login' | 'signup'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -222,6 +233,70 @@ function riskBadgeCls(level: 'low' | 'medium' | 'high') {
     medium: 'bg-amber-50 text-amber-700 border-amber-200',
     high: 'bg-rose-50 text-rose-700 border-rose-200',
   }[level]
+}
+
+function normalizeAuthError(err: unknown) {
+  if (!(err instanceof Error)) return 'Authentication failed. Please try again.'
+
+  if (err.message.toLowerCase().includes('invalid credentials')) return 'Invalid email or password.'
+  if (err.message.toLowerCase().includes('email already registered')) return 'This email is already registered. Please log in.'
+  if (err.message.toLowerCase().includes('validation failed')) return 'Please check your email and password format.'
+
+  return err.message || 'Authentication failed. Please try again.'
+}
+
+function getDomainFromUrl(url: string) {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '').toLowerCase()
+  } catch {
+    return 'unknown'
+  }
+}
+
+function detectSourcePlatform(domain: string): SourcePlatform {
+  if (domain.includes('quora.com')) return 'quora'
+  if (domain.includes('reddit.com')) return 'reddit'
+  if (domain.includes('producthunt.com')) return 'producthunt'
+  if (domain.includes('g2.com')) return 'g2'
+  if (domain.includes('capterra.com')) return 'capterra'
+  if (domain.includes('hubspot.com')) return 'hubspot'
+  if (domain.includes('techcrunch.com')) return 'techcrunch'
+  if (domain.includes('crunchbase.com')) return 'crunchbase'
+  if (domain.includes('medium.com')) return 'medium'
+  if (domain.includes('linkedin.com')) return 'linkedin'
+  return 'generic'
+}
+
+function toSourceLabel(platform: SourcePlatform) {
+  return {
+    quora: 'Quora',
+    reddit: 'Reddit',
+    producthunt: 'Product Hunt',
+    g2: 'G2',
+    capterra: 'Capterra',
+    hubspot: 'HubSpot',
+    techcrunch: 'TechCrunch',
+    crunchbase: 'Crunchbase',
+    medium: 'Medium',
+    linkedin: 'LinkedIn',
+    generic: 'Website',
+  }[platform]
+}
+
+function buildLegacySource(url: string): SourceReference {
+  const domain = getDomainFromUrl(url)
+  return {
+    title: domain === 'unknown' ? 'Source link' : domain,
+    url,
+    domain,
+    platform: detectSourcePlatform(domain),
+    snippet: '',
+  }
+}
+
+function getReportSources(report: AnalysisReport): SourceReference[] {
+  if (report.sources?.length) return report.sources
+  return (report.rawSources ?? []).map(buildLegacySource)
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -402,6 +477,138 @@ const IconFeedback = () => (
   </svg>
 )
 
+function SourcePlatformIcon({ platform }: { platform: SourcePlatform }) {
+  const cfg = {
+    quora: { label: 'Q', cls: 'bg-red-50 text-red-600 border-red-200' },
+    reddit: { label: 'R', cls: 'bg-orange-50 text-orange-600 border-orange-200' },
+    producthunt: { label: 'P', cls: 'bg-amber-50 text-amber-700 border-amber-200' },
+    g2: { label: 'G2', cls: 'bg-sky-50 text-sky-700 border-sky-200' },
+    capterra: { label: 'C', cls: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
+    hubspot: { label: 'H', cls: 'bg-orange-50 text-orange-700 border-orange-200' },
+    techcrunch: { label: 'TC', cls: 'bg-green-50 text-green-700 border-green-200' },
+    crunchbase: { label: 'CB', cls: 'bg-blue-50 text-blue-700 border-blue-200' },
+    medium: { label: 'M', cls: 'bg-zinc-100 text-zinc-700 border-zinc-200' },
+    linkedin: { label: 'in', cls: 'bg-cyan-50 text-cyan-700 border-cyan-200' },
+    generic: { label: 'W', cls: 'bg-violet-50 text-violet-700 border-violet-200' },
+  }[platform]
+
+  return (
+    <span
+      className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border text-[11px] font-semibold ${cfg.cls}`}
+      aria-hidden="true"
+    >
+      {cfg.label}
+    </span>
+  )
+}
+
+function AuthPage() {
+  const navigate = useNavigate()
+  const [mode, setMode] = useState<AuthMode>('login')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [authError, setAuthError] = useState('')
+
+  async function handleEmailAuth(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    setBusy(true)
+    setAuthError('')
+
+    try {
+      if (mode === 'login') {
+        await loginWithEmail(email.trim(), password)
+      } else {
+        await signupWithEmail(email.trim(), password)
+      }
+      navigate('/', { replace: true })
+    } catch (err) {
+      setAuthError(normalizeAuthError(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-zinc-950 px-4 py-8 text-zinc-100 sm:px-6">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(139,92,246,0.22),transparent_45%),radial-gradient(circle_at_80%_70%,rgba(6,182,212,0.12),transparent_35%)]" />
+
+      <div className="relative z-10 w-full max-w-md rounded-3xl border border-white/10 bg-zinc-900/80 p-5 shadow-2xl backdrop-blur-xl sm:p-7">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-violet-300">GoLaunch AI</p>
+        <h1 className="mt-3 text-2xl font-bold text-white sm:text-[1.9rem]">
+          {mode === 'login' ? 'Sign in to continue' : 'Create your account'}
+        </h1>
+        <p className="mt-2 text-sm text-zinc-400">
+          {mode === 'login'
+            ? 'Login is required before accessing startup analysis workspaces.'
+            : 'Sign up once, then use your registered email and password to log in.'}
+        </p>
+
+        <div className="my-5 flex items-center gap-3 text-xs text-zinc-500">
+          <span className="h-px flex-1 bg-white/10" />
+          email authentication
+          <span className="h-px flex-1 bg-white/10" />
+        </div>
+
+        <form className="space-y-3" onSubmit={handleEmailAuth}>
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-zinc-400">Email</label>
+            <input
+              className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm text-white outline-none transition-colors placeholder:text-zinc-500 focus:border-violet-400"
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@company.com"
+              required
+              type="email"
+              value={email}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1.5 block text-xs font-medium text-zinc-400">Password</label>
+            <input
+              className="w-full rounded-xl border border-white/15 bg-white/5 px-4 py-2.5 text-sm text-white outline-none transition-colors placeholder:text-zinc-500 focus:border-violet-400"
+              minLength={6}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="At least 6 characters"
+              required
+              type="password"
+              value={password}
+            />
+          </div>
+
+          {authError && (
+            <div className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+              {authError}
+            </div>
+          )}
+
+          <button
+            className="w-full rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-violet-500 disabled:opacity-60"
+            disabled={busy}
+            type="submit"
+          >
+            {busy ? 'Please wait…' : mode === 'login' ? 'Login' : 'Sign up'}
+          </button>
+        </form>
+
+        <p className="mt-4 text-center text-xs text-zinc-400">
+          {mode === 'login' ? "Don't have an account?" : 'Already have an account?'}{' '}
+          <button
+            className="font-semibold text-violet-300 transition-colors hover:text-violet-200"
+            onClick={() => {
+              setMode((current) => (current === 'login' ? 'signup' : 'login'))
+              setAuthError('')
+            }}
+            type="button"
+          >
+            {mode === 'login' ? 'Sign up' : 'Login'}
+          </button>
+        </p>
+      </div>
+    </div>
+  )
+}
+
 // ─── Analysis Loading Screen ──────────────────────────────────────────────────
 
 function AnalysisLoadingScreen({ stageIndex }: { stageIndex: number }) {
@@ -495,10 +702,10 @@ function LandingPage() {
 
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100">
-      <nav className="flex items-center justify-between border-b border-white/[0.05] px-8 py-5">
+      <nav className="flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.05] px-4 py-4 sm:px-6 sm:py-5 lg:px-8">
         <span className="text-sm font-bold tracking-tight text-white">GoLaunch AI</span>
         <button
-          className="text-xs font-medium text-zinc-500 transition-colors hover:text-white"
+          className="w-full text-left text-xs font-medium text-zinc-500 transition-colors hover:text-white sm:w-auto sm:text-right"
           onClick={() => navigate('/dashboard')}
           type="button"
         >
@@ -506,9 +713,9 @@ function LandingPage() {
         </button>
       </nav>
 
-      <div className="relative mx-auto max-w-5xl px-8 pb-20 pt-20">
+      <div className="relative mx-auto max-w-5xl px-4 pb-16 pt-14 sm:px-6 sm:pb-20 sm:pt-16 lg:px-8 lg:pt-20">
         <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.022)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.022)_1px,transparent_1px)] bg-[size:72px_72px]" />
-        <div className="glow-orb pointer-events-none absolute left-1/2 top-0 h-56 w-[520px] -translate-x-1/2 rounded-full bg-violet-600/18 blur-[110px]" />
+        <div className="glow-orb pointer-events-none absolute left-1/2 top-0 h-44 w-full max-w-[520px] -translate-x-1/2 rounded-full bg-violet-600/18 blur-[90px] sm:h-56 sm:blur-[110px]" />
 
         <div className="relative z-10">
           <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-violet-400/20 bg-violet-400/[0.06] px-4 py-1.5">
@@ -526,21 +733,21 @@ function LandingPage() {
             </span>
           </h1>
 
-          <p className="mb-10 max-w-[500px] text-lg leading-relaxed text-zinc-400">
+          <p className="mb-8 max-w-[500px] text-base leading-relaxed text-zinc-400 sm:mb-10 sm:text-lg">
             AI agents scan market signals, competitors, and execution readiness — then deliver
             investor-grade analysis in minutes.
           </p>
 
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center">
             <button
-              className="rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-[0.98]"
+              className="w-full rounded-xl bg-violet-600 px-6 py-3 text-sm font-semibold text-white transition-all hover:bg-violet-500 hover:shadow-lg hover:shadow-violet-500/20 active:scale-[0.98] sm:w-auto"
               onClick={() => navigate('/analysis/new')}
               type="button"
             >
               Start analysis
             </button>
             <button
-              className="rounded-xl border border-white/10 bg-white/[0.04] px-6 py-3 text-sm font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white active:scale-[0.98]"
+              className="w-full rounded-xl border border-white/10 bg-white/[0.04] px-6 py-3 text-sm font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white active:scale-[0.98] sm:w-auto"
               onClick={() => navigate('/dashboard')}
               type="button"
             >
@@ -550,7 +757,7 @@ function LandingPage() {
         </div>
       </div>
 
-      <div className="mx-auto max-w-5xl px-8 pb-24">
+      <div className="mx-auto max-w-5xl px-4 pb-16 sm:px-6 sm:pb-20 lg:px-8 lg:pb-24">
         <p className="mb-5 text-[11px] font-semibold uppercase tracking-widest text-zinc-600">
           What GoLaunch delivers
         </p>
@@ -603,8 +810,8 @@ function DashboardPage({ reportCards }: { reportCards: AnalysisReportCard[] }) {
   return (
     <div className="min-h-screen bg-[#F8F7F4]">
       <header className="sticky top-0 z-10 border-b border-zinc-200/60 bg-[#F8F7F4]/90 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-8 py-4">
-          <div className="flex items-center gap-5">
+        <div className="mx-auto flex max-w-6xl flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6 lg:px-8">
+          <div className="flex min-w-0 flex-wrap items-center gap-3 sm:gap-5">
             <button
               className="text-sm font-bold tracking-tight text-zinc-900 transition-colors hover:text-violet-700"
               onClick={() => navigate('/')}
@@ -616,7 +823,7 @@ function DashboardPage({ reportCards }: { reportCards: AnalysisReportCard[] }) {
             <span className="text-sm text-zinc-500">Analyses</span>
           </div>
           <button
-            className="flex items-center gap-1.5 rounded-xl bg-zinc-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-zinc-800 active:scale-[0.98]"
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-zinc-900 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-zinc-800 active:scale-[0.98] sm:w-auto"
             onClick={() => navigate('/analysis/new')}
             type="button"
           >
@@ -636,7 +843,7 @@ function DashboardPage({ reportCards }: { reportCards: AnalysisReportCard[] }) {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-8 py-10">
+      <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
         <div className="mb-8">
           <h1 className="text-2xl font-bold tracking-tight text-zinc-900">Your analyses</h1>
           <p className="mt-1 text-sm text-zinc-500">
@@ -647,7 +854,7 @@ function DashboardPage({ reportCards }: { reportCards: AnalysisReportCard[] }) {
         </div>
 
         {reportCards.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-zinc-200 bg-white py-24 text-center">
+          <div className="flex flex-col items-center justify-center rounded-2xl border border-zinc-200 bg-white px-6 py-16 text-center sm:py-24">
             <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-100">
               <svg
                 width="22"
@@ -731,7 +938,7 @@ function DashboardPage({ reportCards }: { reportCards: AnalysisReportCard[] }) {
                   </div>
                 </div>
 
-                <div className="mt-4 flex items-center justify-between border-t border-zinc-100 pt-4">
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-100 pt-4">
                   <span className="text-xs text-zinc-400">
                     {new Date(report.generatedAt).toLocaleDateString('en-US', {
                       month: 'short',
@@ -825,7 +1032,7 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
   return (
     <div className="min-h-screen bg-[#F8F7F4]">
       <header className="border-b border-zinc-200/60 bg-[#F8F7F4]/90 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-3xl items-center gap-2 px-8 py-4">
+        <div className="mx-auto flex max-w-3xl flex-wrap items-center gap-2 px-4 py-4 sm:px-6 lg:px-8">
           <button
             className="text-sm text-zinc-500 transition-colors hover:text-zinc-900"
             onClick={() => navigate('/dashboard')}
@@ -838,9 +1045,10 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
         </div>
       </header>
 
-      <div ref={scrollRef} className="mx-auto max-w-3xl px-8 py-10">
+      <div ref={scrollRef} className="mx-auto max-w-3xl px-4 py-8 sm:px-6 sm:py-10 lg:px-8">
         {/* Step indicator */}
-        <div className="mb-10 flex items-start">
+        <div className="mb-8 overflow-x-auto pb-2 sm:mb-10">
+          <div className="flex min-w-max items-start">
           {STEPS.map((s, i) => (
             <div key={s} className="flex items-start">
               <div className="flex flex-col items-center">
@@ -875,15 +1083,16 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
               </div>
               {i < STEPS.length - 1 && (
                 <div
-                  className={`mx-3 mt-4 h-0.5 w-16 transition-colors ${i < step ? 'bg-violet-500' : 'bg-zinc-200'}`}
+                  className={`mx-3 mt-4 h-0.5 w-12 transition-colors sm:w-16 ${i < step ? 'bg-violet-500' : 'bg-zinc-200'}`}
                 />
               )}
             </div>
           ))}
+          </div>
         </div>
 
         <form onSubmit={handleSubmit}>
-          <div className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm">
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-6 lg:p-8">
             {/* ── Step 0: Idea Basics ── */}
             {step === 0 && (
               <div className="space-y-5">
@@ -1149,9 +1358,9 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
             )}
 
             {/* Navigation */}
-            <div className="mt-8 flex items-center justify-between border-t border-zinc-100 pt-6">
+            <div className="mt-8 flex flex-col-reverse gap-3 border-t border-zinc-100 pt-6 sm:flex-row sm:items-center sm:justify-between">
               <button
-                className="rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40"
+                className="w-full rounded-xl border border-zinc-200 px-4 py-2.5 text-sm font-medium text-zinc-600 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-40 sm:w-auto"
                 disabled={step === 0}
                 onClick={() => { setErrors({}); setStep((s) => s - 1) }}
                 type="button"
@@ -1161,7 +1370,7 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
 
               {step < 2 ? (
                 <button
-                  className="rounded-xl bg-zinc-900 px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 active:scale-[0.98]"
+                  className="w-full rounded-xl bg-zinc-900 px-6 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 active:scale-[0.98] sm:w-auto"
                   onClick={tryAdvance}
                   type="button"
                 >
@@ -1169,7 +1378,7 @@ function WizardPage({ saveReport }: { saveReport: (report: AnalysisReport) => vo
                 </button>
               ) : (
                 <button
-                  className="flex items-center gap-2 rounded-xl bg-violet-600 px-6 py-2.5 text-sm font-semibold text-white transition-all hover:bg-violet-500 active:scale-[0.98]"
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-6 py-2.5 text-sm font-semibold text-white transition-all hover:bg-violet-500 active:scale-[0.98] sm:w-auto"
                   type="submit"
                 >
                   Generate analysis →
@@ -1208,24 +1417,37 @@ function AnalysisWorkspace({
   const [feedbackSent, setFeedbackSent] = useState(false)
 
   useEffect(() => {
-    if (report) return
-    setStatus('loading')
+    let cancelled = false
+    if (!report) {
+      setStatus('loading')
+    }
+
     getReport(requestId)
       .then((fetched) => {
+        if (cancelled) return
         setReport(fetched)
         saveReport(fetched)
         setStatus('idle')
       })
       .catch((err) => {
-        setLoadError(err instanceof Error ? err.message : 'Failed to load report')
-        setStatus('error')
+        if (cancelled) return
+        if (!report) {
+          setLoadError(err instanceof Error ? err.message : 'Failed to load report')
+          setStatus('error')
+        }
       })
-  }, [report, requestId, saveReport])
+
+    return () => {
+      cancelled = true
+    }
+  }, [requestId, saveReport])
 
   const currentTab = useMemo(() => {
     const parts = location.pathname.split('/').filter(Boolean)
     return parts[2] ?? 'overview'
   }, [location.pathname])
+
+  const sourceItems = useMemo(() => (report ? getReportSources(report) : []), [report])
 
   const tabs = [
     { key: 'overview', label: 'Overview', icon: <IconOverview /> },
@@ -1305,10 +1527,10 @@ function AnalysisWorkspace({
   const CHART_COLORS = ['#8b5cf6', '#22d3ee', '#10b981', '#f59e0b', '#f87171']
 
   return (
-    <div className="flex min-h-screen">
+    <div className="min-h-screen lg:flex">
       {/* ── Sidebar ── */}
-      <aside className="fixed inset-y-0 left-0 flex w-56 flex-col border-r border-white/[0.05] bg-zinc-950">
-        <div className="border-b border-white/[0.05] p-4">
+      <aside className="border-b border-white/[0.05] bg-zinc-950 lg:fixed lg:inset-y-0 lg:left-0 lg:flex lg:w-56 lg:flex-col lg:border-b-0 lg:border-r">
+        <div className="border-b border-white/[0.05] p-4 lg:shrink-0">
           <button
             className="mb-4 flex items-center gap-1.5 text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-300"
             onClick={() => navigate('/dashboard')}
@@ -1343,14 +1565,14 @@ function AnalysisWorkspace({
           </div>
         </div>
 
-        <nav className="flex-1 overflow-y-auto p-3">
-          <div className="space-y-0.5">
+        <nav className="overflow-x-auto border-b border-white/[0.05] p-3 lg:flex-1 lg:overflow-y-auto lg:border-b-0">
+          <div className="flex min-w-max gap-2 lg:min-w-0 lg:flex-col lg:gap-0.5">
             {tabs.map((tab) => (
               <NavLink
                 key={tab.key}
                 to={`/analysis/${report.requestId}/${tab.key}`}
                 className={({ isActive }) =>
-                  `flex items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
+                  `flex shrink-0 items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-medium transition-all ${
                     isActive
                       ? 'bg-violet-500/15 text-violet-400'
                       : 'text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300'
@@ -1364,7 +1586,7 @@ function AnalysisWorkspace({
           </div>
         </nav>
 
-        <div className="border-t border-white/[0.05] p-4 space-y-2.5">
+        <div className="grid grid-cols-1 gap-2.5 p-4 sm:grid-cols-3 lg:mt-auto lg:grid-cols-1 lg:border-t lg:border-white/[0.05] lg:space-y-2.5">
           {[
             {
               label: 'Viability',
@@ -1378,7 +1600,7 @@ function AnalysisWorkspace({
               inverted: false,
             },
           ].map((m) => (
-            <div key={m.label}>
+            <div key={m.label} className="min-w-0">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-[11px] font-medium text-zinc-600">{m.label}</span>
                 <span
@@ -1409,8 +1631,8 @@ function AnalysisWorkspace({
       </aside>
 
       {/* ── Main content ── */}
-      <main className="ml-56 min-h-screen flex-1 bg-[#F8F7F4]">
-        <div className="mx-auto max-w-[860px] px-8 py-8">
+      <main className="min-h-screen flex-1 bg-[#F8F7F4] lg:ml-56">
+        <div className="mx-auto max-w-[860px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
           {/* Header */}
           <header className="mb-7">
             <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">
@@ -1654,7 +1876,7 @@ function AnalysisWorkspace({
                   <p className="mb-4 text-xs text-zinc-400">
                     Scores across all analysis dimensions
                   </p>
-                  <div className="h-72">
+                  <div className="h-64 sm:h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <RadarChart data={report.charts.radarMetrics}>
                         <PolarGrid stroke="rgba(0,0,0,0.06)" />
@@ -1682,7 +1904,7 @@ function AnalysisWorkspace({
                     Score breakdown
                   </h2>
                   <p className="mb-4 text-xs text-zinc-400">Per-metric scores out of 100</p>
-                  <div className="h-72">
+                  <div className="h-64 sm:h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart data={report.charts.scoreBreakdown} barCategoryGap="38%">
                         <CartesianGrid
@@ -1725,7 +1947,7 @@ function AnalysisWorkspace({
                 <p className="mb-4 text-xs text-zinc-400">
                   Projected demand, competition, and risk across launch phases
                 </p>
-                <div className="h-72">
+                <div className="h-64 sm:h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={report.charts.trendProjection}>
                       <defs>
@@ -1790,7 +2012,7 @@ function AnalysisWorkspace({
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>
-                <div className="mt-3 flex items-center gap-5">
+                <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2">
                   {[
                     { label: 'Demand', color: '#10b981' },
                     { label: 'Competition', color: '#8b5cf6' },
@@ -1813,7 +2035,7 @@ function AnalysisWorkspace({
                   <p className="mb-4 text-xs text-zinc-400">
                     Risk score per category (higher = more risk)
                   </p>
-                  <div className="h-64">
+                  <div className="h-64 overflow-x-auto sm:overflow-visible">
                     <ResponsiveContainer width="100%" height="100%">
                       <BarChart
                         data={report.charts.riskDistribution}
@@ -1870,7 +2092,7 @@ function AnalysisWorkspace({
                   <p className="mb-4 text-xs text-zinc-400">
                     Research sources by domain category
                   </p>
-                  <div className="h-52">
+                  <div className="h-52 sm:h-56">
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
@@ -1985,39 +2207,49 @@ function AnalysisWorkspace({
           {/* ═══ SOURCES TAB ═══ */}
           {currentTab === 'sources' && (
             <div className="rounded-2xl border border-zinc-200 bg-white p-6">
-              <div className="mb-5 flex items-center justify-between">
+              <div className="mb-5 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
                     Research sources
                   </h2>
                   <p className="mt-1 text-sm text-zinc-500">
-                    {report.rawSources.length} URLs discovered and scraped during analysis
+                    {sourceItems.length} sources collected from startup, competitor, and marketing research
                   </p>
                 </div>
               </div>
               <div className="space-y-2">
-                {report.rawSources.length === 0 ? (
+                {sourceItems.length === 0 ? (
                   <p className="text-sm text-zinc-400">No sources recorded for this analysis.</p>
                 ) : (
-                  report.rawSources.map((source, i) => {
-                    let domain = source
-                    try {
-                      domain = new URL(source).hostname.replace('www.', '')
-                    } catch {}
+                  sourceItems.map((source, i) => {
                     return (
                       <a
                         key={i}
-                        className="group flex items-center gap-3 rounded-xl border border-zinc-100 bg-zinc-50/50 px-4 py-3 transition-colors hover:border-violet-200 hover:bg-violet-50/30"
-                        href={source}
+                        className="group flex items-start gap-3 rounded-xl border border-zinc-100 bg-zinc-50/60 px-4 py-3 transition-colors hover:border-violet-200 hover:bg-violet-50/40"
+                        href={source.url}
                         rel="noreferrer"
                         target="_blank"
                       >
-                        <span className="shrink-0 rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-500">
-                          {domain}
-                        </span>
-                        <span className="truncate text-xs text-zinc-600 transition-colors group-hover:text-violet-600">
-                          {source}
-                        </span>
+                        <SourcePlatformIcon platform={source.platform} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-zinc-800 transition-colors group-hover:text-violet-700">
+                              {source.title}
+                            </span>
+                            <span className="rounded-md border border-zinc-200 bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                              {toSourceLabel(source.platform)}
+                            </span>
+                            <span className="text-[11px] text-zinc-400">{source.domain}</span>
+                          </div>
+                          {source.snippet ? (
+                            <p className="mt-1 line-clamp-2 text-xs text-zinc-500 transition-colors group-hover:text-zinc-700">
+                              {source.snippet}
+                            </p>
+                          ) : null}
+                          <p className="mt-1 truncate text-[11px] text-zinc-400 transition-colors group-hover:text-violet-600">
+                            {source.url}
+                          </p>
+                        </div>
                         <svg
                           width="12"
                           height="12"
@@ -2113,7 +2345,7 @@ function AnalysisWorkspace({
                   )}
 
                   <button
-                    className="flex items-center gap-2 rounded-xl bg-zinc-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 active:scale-[0.98]"
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-zinc-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:opacity-50 active:scale-[0.98] sm:w-auto"
                     disabled={sendingFeedback}
                     onClick={handleFeedbackSubmit}
                     type="button"
@@ -2143,8 +2375,36 @@ function AppRouter() {
   const { reports, saveReport } = useReportsStore()
   const [health, setHealth] = useState<'checking' | 'online' | 'offline'>('checking')
   const [reportCards, setReportCards] = useState<AnalysisReportCard[]>([])
+  const [authReady, setAuthReady] = useState(false)
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [accountLabel, setAccountLabel] = useState('')
 
   useEffect(() => {
+    const unsub = subscribeToAuthState((user) => {
+      setIsAuthenticated(Boolean(user))
+      setAccountLabel(user?.email || '')
+      setAuthReady(true)
+    })
+
+    return () => unsub()
+  }, [])
+
+  useEffect(() => {
+    if (!authReady || !isAuthenticated) {
+      setReportCards(
+        reports.map((r) => ({
+          requestId: r.requestId,
+          generatedAt: r.generatedAt,
+          productName: r.idea.productName,
+          oneLiner: r.idea.oneLiner,
+          recommendation: r.scoring.recommendation,
+          viabilityScore: r.scoring.overallViabilityScore,
+          riskScore: r.risk.riskScore,
+        })),
+      )
+      return
+    }
+
     listReports()
       .then(setReportCards)
       .catch(() => {
@@ -2161,7 +2421,7 @@ function AppRouter() {
           })),
         )
       })
-  }, [reports])
+  }, [authReady, isAuthenticated, reports])
 
   useEffect(() => {
     fetchHealth()
@@ -2176,21 +2436,56 @@ function AppRouter() {
         ? 'bg-rose-400'
         : 'bg-amber-400 animate-pulse'
 
+  if (!authReady) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950 px-4 text-zinc-100">
+        <div className="text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-violet-500/20 border-t-violet-500" />
+          <p className="mt-3 text-sm text-zinc-400">Checking your session…</p>
+        </div>
+      </div>
+    )
+  }
+
+  function ProtectedShell() {
+    if (!isAuthenticated) {
+      return <Navigate replace to="/auth" />
+    }
+    return <Outlet />
+  }
+
   return (
     <>
-      <div className="fixed right-4 top-4 z-50 flex items-center gap-1.5 rounded-full border border-white/10 bg-zinc-900/90 px-3 py-1.5 text-[11px] font-medium text-zinc-400 shadow-lg backdrop-blur-sm">
+      <div className="fixed right-4 top-4 z-50 flex items-center gap-2 rounded-full border border-white/10 bg-zinc-900/90 px-3 py-1.5 text-[11px] font-medium text-zinc-400 shadow-lg backdrop-blur-sm">
         <span className={`h-1.5 w-1.5 rounded-full ${healthDot}`} />
         API {health}
+        {isAuthenticated && (
+          <>
+            <span className="hidden max-w-40 truncate text-zinc-500 sm:inline">{accountLabel}</span>
+            <button
+              className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-zinc-300 transition-colors hover:bg-white/10"
+              onClick={() => {
+                logout().catch(() => {})
+              }}
+              type="button"
+            >
+              Logout
+            </button>
+          </>
+        )}
       </div>
       <Routes>
-        <Route element={<LandingPage />} path="/" />
-        <Route element={<DashboardPage reportCards={reportCards} />} path="/dashboard" />
-        <Route element={<WizardPage saveReport={saveReport} />} path="/analysis/new" />
-        <Route
-          element={<AnalysisWorkspace reports={reports} saveReport={saveReport} />}
-          path="/analysis/:requestId/:tab"
-        />
-        <Route element={<Navigate replace to="/dashboard" />} path="*" />
+        <Route element={isAuthenticated ? <Navigate replace to="/" /> : <AuthPage />} path="/auth" />
+        <Route element={<ProtectedShell />}>
+          <Route element={<LandingPage />} path="/" />
+          <Route element={<DashboardPage reportCards={reportCards} />} path="/dashboard" />
+          <Route element={<WizardPage saveReport={saveReport} />} path="/analysis/new" />
+          <Route
+            element={<AnalysisWorkspace reports={reports} saveReport={saveReport} />}
+            path="/analysis/:requestId/:tab"
+          />
+        </Route>
+        <Route element={<Navigate replace to={isAuthenticated ? '/dashboard' : '/auth'} />} path="*" />
       </Routes>
     </>
   )

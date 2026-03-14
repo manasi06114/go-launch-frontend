@@ -25,6 +25,27 @@ export type AnalysisRequest = {
   constraints?: string[]
 }
 
+export type SourcePlatform =
+  | 'quora'
+  | 'reddit'
+  | 'producthunt'
+  | 'g2'
+  | 'capterra'
+  | 'hubspot'
+  | 'techcrunch'
+  | 'crunchbase'
+  | 'medium'
+  | 'linkedin'
+  | 'generic'
+
+export type SourceReference = {
+  title: string
+  url: string
+  domain: string
+  platform: SourcePlatform
+  snippet: string
+}
+
 export type MarketSignal = {
   demandScore: number
   trendSignals: string[]
@@ -81,6 +102,7 @@ export type AnalysisReport = {
   charts: AnalysisCharts
   actionPlan: string[]
   investorNarrative: string
+  sources?: SourceReference[]
   rawSources: string[]
 }
 

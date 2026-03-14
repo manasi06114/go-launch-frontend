@@ -1,19 +1,32 @@
 import type { AnalysisReport, AnalysisReportCard, AnalysisRequest, FeedbackPayload } from './types'
+import { getAuthToken } from './auth'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAuthToken()
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {}),
     },
   })
 
   if (!response.ok) {
     const text = await response.text()
-    throw new Error(text || `Request failed with status ${response.status}`)
+    if (text) {
+      let message = text
+      try {
+        const payload = JSON.parse(text) as { message?: string }
+        message = payload.message || text
+      } catch {
+        // Fall back to raw response text when body is not JSON.
+      }
+      throw new Error(message)
+    }
+    throw new Error(`Request failed with status ${response.status}`)
   }
 
   if (response.status === 202) {
