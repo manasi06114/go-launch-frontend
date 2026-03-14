@@ -1,5 +1,5 @@
 import './App.css'
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   Area,
   AreaChart,
@@ -192,13 +192,13 @@ function persistReports(reports: AnalysisReport[]) {
 function useReportsStore() {
   const [reports, setReports] = useState<AnalysisReport[]>(() => loadReports())
 
-  const saveReport = (report: AnalysisReport) => {
+  const saveReport = useCallback((report: AnalysisReport) => {
     setReports((prev) => {
       const next = [report, ...prev.filter((r) => r.requestId !== report.requestId)]
       persistReports(next)
       return next
     })
-  }
+  }, [])
 
   return { reports, saveReport }
 }
@@ -2371,6 +2371,13 @@ function AnalysisWorkspace({
 
 // ─── App Router ───────────────────────────────────────────────────────────────
 
+function ProtectedShell({ isAuthenticated }: { isAuthenticated: boolean }) {
+  if (!isAuthenticated) {
+    return <Navigate replace to="/auth" />
+  }
+  return <Outlet />
+}
+
 function AppRouter() {
   const { reports, saveReport } = useReportsStore()
   const [health, setHealth] = useState<'checking' | 'online' | 'offline'>('checking')
@@ -2447,13 +2454,6 @@ function AppRouter() {
     )
   }
 
-  function ProtectedShell() {
-    if (!isAuthenticated) {
-      return <Navigate replace to="/auth" />
-    }
-    return <Outlet />
-  }
-
   return (
     <>
       <div className="fixed right-4 top-4 z-50 flex items-center gap-2 rounded-full border border-white/10 bg-zinc-900/90 px-3 py-1.5 text-[11px] font-medium text-zinc-400 shadow-lg backdrop-blur-sm">
@@ -2476,7 +2476,7 @@ function AppRouter() {
       </div>
       <Routes>
         <Route element={isAuthenticated ? <Navigate replace to="/" /> : <AuthPage />} path="/auth" />
-        <Route element={<ProtectedShell />}>
+        <Route element={<ProtectedShell isAuthenticated={isAuthenticated} />}>
           <Route element={<LandingPage />} path="/" />
           <Route element={<DashboardPage reportCards={reportCards} />} path="/dashboard" />
           <Route element={<WizardPage saveReport={saveReport} />} path="/analysis/new" />
