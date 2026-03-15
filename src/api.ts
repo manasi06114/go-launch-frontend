@@ -1,4 +1,12 @@
-import type { AnalysisReport, AnalysisReportCard, AnalysisRequest, FeedbackPayload } from './types'
+import type {
+  AnalysisReport,
+  AnalysisReportCard,
+  AnalysisRequest,
+  FeedbackPayload,
+  ReportChatRequest,
+  ReportChatResponse,
+  ReportChatMessage,
+} from './types'
 import { getAuthToken } from './auth'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL ?? '').replace(/\/$/, '')
@@ -60,4 +68,32 @@ export function submitFeedback(payload: FeedbackPayload) {
     method: 'POST',
     body: JSON.stringify(payload),
   })
+}
+
+export function getReportChat(requestId: string) {
+  return request<{ messages: ReportChatMessage[] }>(`/api/v1/analysis/chat/${requestId}`)
+}
+
+export function sendReportChat(payload: ReportChatRequest) {
+  return request<ReportChatResponse>('/api/v1/analysis/chat', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function downloadPitchDeck(requestId: string): Promise<Blob> {
+  const token = getAuthToken()
+  const response = await fetch(`${apiBaseUrl}/api/v1/analysis/pitch-deck/${requestId}`, {
+    method: 'GET',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw new Error(text || `Pitch deck generation failed with status ${response.status}`)
+  }
+
+  return response.blob()
 }

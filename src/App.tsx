@@ -30,7 +30,16 @@ import {
   useNavigate,
   useParams,
 } from 'react-router-dom'
-import { fetchHealth, generateReport, getReport, listReports, submitFeedback } from './api'
+import {
+  fetchHealth,
+  generateReport,
+  getReport,
+  getReportChat,
+  listReports,
+  downloadPitchDeck,
+  sendReportChat,
+  submitFeedback,
+} from './api'
 import {
   loginWithEmail,
   logout,
@@ -42,6 +51,8 @@ import type {
   AnalysisReportCard,
   AnalysisRequest,
   FeedbackPayload,
+  ResearchWebsite,
+  ReportChatMessage,
   SourcePlatform,
   SourceReference,
 } from './types'
@@ -245,28 +256,6 @@ function normalizeAuthError(err: unknown) {
   return err.message || 'Authentication failed. Please try again.'
 }
 
-function getDomainFromUrl(url: string) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '').toLowerCase()
-  } catch {
-    return 'unknown'
-  }
-}
-
-function detectSourcePlatform(domain: string): SourcePlatform {
-  if (domain.includes('quora.com')) return 'quora'
-  if (domain.includes('reddit.com')) return 'reddit'
-  if (domain.includes('producthunt.com')) return 'producthunt'
-  if (domain.includes('g2.com')) return 'g2'
-  if (domain.includes('capterra.com')) return 'capterra'
-  if (domain.includes('hubspot.com')) return 'hubspot'
-  if (domain.includes('techcrunch.com')) return 'techcrunch'
-  if (domain.includes('crunchbase.com')) return 'crunchbase'
-  if (domain.includes('medium.com')) return 'medium'
-  if (domain.includes('linkedin.com')) return 'linkedin'
-  return 'generic'
-}
-
 function toSourceLabel(platform: SourcePlatform) {
   return {
     quora: 'Quora',
@@ -283,20 +272,69 @@ function toSourceLabel(platform: SourcePlatform) {
   }[platform]
 }
 
-function buildLegacySource(url: string): SourceReference {
-  const domain = getDomainFromUrl(url)
-  return {
-    title: domain === 'unknown' ? 'Source link' : domain,
-    url,
-    domain,
-    platform: detectSourcePlatform(domain),
-    snippet: '',
-  }
+function getReportSources(report: AnalysisReport): SourceReference[] {
+  return report.sources ?? []
 }
 
-function getReportSources(report: AnalysisReport): SourceReference[] {
-  if (report.sources?.length) return report.sources
-  return (report.rawSources ?? []).map(buildLegacySource)
+function getReportSourceWebsites(report: AnalysisReport): ResearchWebsite[] {
+  if (report.sourceWebsites?.length) return report.sourceWebsites
+
+  const byDomain = new Map<string, ResearchWebsite>()
+  for (const source of getReportSources(report)) {
+    if (!source.domain || source.domain === 'unknown' || byDomain.has(source.domain)) continue
+
+    byDomain.set(source.domain, {
+      domain: source.domain,
+      websiteUrl: `https://${source.domain}`,
+      platform: source.platform,
+      iconUrl: `https://www.google.com/s2/favicons?domain=${encodeURIComponent(source.domain)}&sz=64`,
+    })
+  }
+
+  return Array.from(byDomain.values()).sort((left, right) => left.domain.localeCompare(right.domain))
+}
+
+function parseExecutiveSummaryPoints(summary: string): string[] {
+  const cleanedLines = summary
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^#+\s*/, ''))
+    .map((line) => line.replace(/^[-*•]+\s*/, ''))
+    .map((line) => line.replace(/^\d+[.):-]?\s*/, ''))
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+
+  if (cleanedLines.length > 1) return cleanedLines
+
+  const sentenceFallback = summary
+    .replace(/[#•-]/g, ' ')
+    .split(/[.!?]+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 12)
+
+  return sentenceFallback.length ? sentenceFallback.slice(0, 5) : [summary.trim()]
+}
+
+function parseNarrativePoints(narrative: string): string[] {
+  return parseExecutiveSummaryPoints(narrative)
+}
+
+function renderBoldInlineText(text: string) {
+  const parts = text.split(/(\*\*.*?\*\*)/g).filter(Boolean)
+
+  return parts.map((part, idx) => {
+    const boldMatch = part.match(/^\*\*(.*?)\*\*$/)
+    if (boldMatch) {
+      return (
+        <strong key={`b-${idx}`} className="font-semibold text-zinc-900">
+          {boldMatch[1]}
+        </strong>
+      )
+    }
+
+    return <span key={`t-${idx}`}>{part.replace(/\*\*/g, '')}</span>
+  })
 }
 
 // ─── Shared Components ────────────────────────────────────────────────────────
@@ -1415,6 +1453,14 @@ function AnalysisWorkspace({
   const [sendingFeedback, setSendingFeedback] = useState(false)
   const [feedbackError, setFeedbackError] = useState('')
   const [feedbackSent, setFeedbackSent] = useState(false)
+  const [chatMessages, setChatMessages] = useState<ReportChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [chatLoading, setChatLoading] = useState(false)
+  const [chatSending, setChatSending] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const [creatingPitchDeck, setCreatingPitchDeck] = useState(false)
+  const [pitchDeckError, setPitchDeckError] = useState('')
+  const chatScrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -1442,12 +1488,42 @@ function AnalysisWorkspace({
     }
   }, [requestId, saveReport])
 
+  useEffect(() => {
+    let cancelled = false
+
+    setChatLoading(true)
+    setChatError('')
+    getReportChat(requestId)
+      .then((payload) => {
+        if (cancelled) return
+        setChatMessages(payload.messages)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        setChatError(err instanceof Error ? err.message : 'Unable to load chat history')
+      })
+      .finally(() => {
+        if (cancelled) return
+        setChatLoading(false)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [requestId])
+
+  useEffect(() => {
+    if (!chatScrollRef.current) return
+    chatScrollRef.current.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [chatMessages, chatSending])
+
   const currentTab = useMemo(() => {
     const parts = location.pathname.split('/').filter(Boolean)
     return parts[2] ?? 'overview'
   }, [location.pathname])
 
   const sourceItems = useMemo(() => (report ? getReportSources(report) : []), [report])
+  const sourceWebsites = useMemo(() => (report ? getReportSourceWebsites(report) : []), [report])
 
   const tabs = [
     { key: 'overview', label: 'Overview', icon: <IconOverview /> },
@@ -1477,6 +1553,56 @@ function AnalysisWorkspace({
       setFeedbackError(err instanceof Error ? err.message : 'Feedback submission failed')
     } finally {
       setSendingFeedback(false)
+    }
+  }
+
+  async function handleChatSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const message = chatInput.trim()
+    if (!message || chatSending || !report) return
+
+    const optimisticUserMessage: ReportChatMessage = {
+      role: 'user',
+      content: message,
+      createdAt: new Date().toISOString(),
+    }
+
+    setChatError('')
+    setChatSending(true)
+    setChatInput('')
+    setChatMessages((prev) => [...prev, optimisticUserMessage])
+
+    try {
+      const payload = await sendReportChat({ requestId: report.requestId, message })
+      setChatMessages(payload.messages)
+    } catch (err) {
+      setChatMessages((prev) => prev.filter((item) => item !== optimisticUserMessage))
+      setChatInput(message)
+      setChatError(err instanceof Error ? err.message : 'Failed to send message')
+    } finally {
+      setChatSending(false)
+    }
+  }
+
+  async function handleCreatePitchDeck() {
+    if (!report || creatingPitchDeck) return
+
+    setPitchDeckError('')
+    setCreatingPitchDeck(true)
+    try {
+      const fileBlob = await downloadPitchDeck(report.requestId)
+      const blobUrl = window.URL.createObjectURL(fileBlob)
+      const anchor = document.createElement('a')
+      anchor.href = blobUrl
+      anchor.download = `${report.idea.productName.replace(/[^a-z0-9-_]+/gi, '_')}_pitch_deck.pdf`
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      window.URL.revokeObjectURL(blobUrl)
+    } catch (err) {
+      setPitchDeckError(err instanceof Error ? err.message : 'Unable to create pitch deck')
+    } finally {
+      setCreatingPitchDeck(false)
     }
   }
 
@@ -1635,13 +1761,26 @@ function AnalysisWorkspace({
         <div className="mx-auto max-w-[860px] px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
           {/* Header */}
           <header className="mb-7">
-            <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">
-              {currentTab}
-            </p>
-            <h1 className="mt-1 text-2xl font-bold tracking-tight text-zinc-900">
-              {report.idea.productName}
-            </h1>
-            <p className="mt-1 text-sm text-zinc-500">{report.idea.oneLiner}</p>
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">
+                  {currentTab}
+                </p>
+                <h1 className="mt-1 text-2xl font-bold tracking-tight text-zinc-900">
+                  {report.idea.productName}
+                </h1>
+                <p className="mt-1 text-sm text-zinc-500">{report.idea.oneLiner}</p>
+              </div>
+              <button
+                className="rounded-xl bg-zinc-900 px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-55"
+                onClick={handleCreatePitchDeck}
+                type="button"
+                disabled={creatingPitchDeck}
+              >
+                {creatingPitchDeck ? 'Creating pitch deck...' : 'Create pitch deck'}
+              </button>
+            </div>
+            {pitchDeckError && <p className="mt-2 text-xs text-rose-600">{pitchDeckError}</p>}
           </header>
 
           {/* ═══ OVERVIEW TAB ═══ */}
@@ -1681,7 +1820,14 @@ function AnalysisWorkspace({
                 <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
                   Executive summary
                 </h2>
-                <p className="mt-3 text-sm leading-7 text-zinc-700">{report.executiveSummary}</p>
+                <ol className="mt-3 space-y-2 text-sm leading-7 text-zinc-700">
+                  {parseExecutiveSummaryPoints(report.executiveSummary).map((point, idx) => (
+                    <li key={`${idx}-${point.slice(0, 24)}`} className="flex items-start gap-2">
+                      <span className="mt-0.5 text-zinc-500">{idx + 1}.</span>
+                      <span>{renderBoldInlineText(point)}</span>
+                    </li>
+                  ))}
+                </ol>
               </div>
 
               {/* Market + Competition */}
@@ -1860,6 +2006,73 @@ function AnalysisWorkspace({
                     </p>
                   </div>
                 </div>
+              </div>
+
+              <div className="rounded-2xl border border-zinc-200 bg-white p-0">
+                <div className="border-b border-zinc-100 px-6 py-4">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    Strategy chat
+                  </h2>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    Ask follow-up questions about this report. Conversation stays linked to this analysis.
+                  </p>
+                </div>
+
+                <div className="max-h-[380px] space-y-3 overflow-y-auto bg-zinc-50/50 px-4 py-4 sm:px-6">
+                  {chatLoading ? (
+                    <p className="text-sm text-zinc-500">Loading conversation…</p>
+                  ) : chatMessages.length === 0 ? (
+                    <div className="rounded-xl border border-dashed border-zinc-200 bg-white px-4 py-5 text-sm text-zinc-500">
+                      Start the conversation with questions like: "What should I do in the next 30 days?"
+                    </div>
+                  ) : (
+                    chatMessages.map((msg, index) => (
+                      <div
+                        key={`${msg.createdAt}-${index}`}
+                        className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      >
+                        <div
+                          className={`max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 sm:max-w-[80%] ${
+                            msg.role === 'user'
+                              ? 'bg-zinc-900 text-white'
+                              : 'border border-zinc-200 bg-white text-zinc-700'
+                          }`}
+                        >
+                          {renderBoldInlineText(msg.content)}
+                        </div>
+                      </div>
+                    ))
+                  )}
+
+                  {chatSending && (
+                    <div className="flex justify-start">
+                      <div className="max-w-[88%] rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-sm text-zinc-500 sm:max-w-[80%]">
+                        Thinking…
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatScrollRef} />
+                </div>
+
+                <form className="border-t border-zinc-100 bg-white p-4 sm:p-5" onSubmit={handleChatSubmit}>
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+                    <textarea
+                      className="min-h-[78px] w-full resize-y rounded-xl border border-zinc-200 bg-white px-3 py-2.5 text-sm text-zinc-700 outline-none transition focus:border-violet-400 focus:ring-4 focus:ring-violet-100"
+                      placeholder="Ask about risks, GTM, pricing, milestones, or next steps..."
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      disabled={chatSending}
+                    />
+                    <button
+                      className="rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-violet-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      type="submit"
+                      disabled={chatSending || !chatInput.trim()}
+                    >
+                      Send
+                    </button>
+                  </div>
+                  {chatError && <p className="mt-2 text-xs text-rose-600">{chatError}</p>}
+                </form>
               </div>
             </div>
           )}
@@ -2142,7 +2355,14 @@ function AnalysisWorkspace({
                 <h2 className="mb-1 text-xs font-semibold uppercase tracking-wider text-zinc-400">
                   Investor narrative
                 </h2>
-                <p className="mt-4 text-sm leading-8 text-zinc-700">{report.investorNarrative}</p>
+                <ol className="mt-4 space-y-2 text-sm leading-8 text-zinc-700">
+                  {parseNarrativePoints(report.investorNarrative).map((point, idx) => (
+                    <li key={`${idx}-${point.slice(0, 24)}`} className="flex items-start gap-2">
+                      <span className="mt-0.5 text-zinc-500">{idx + 1}.</span>
+                      <span>{renderBoldInlineText(point)}</span>
+                    </li>
+                  ))}
+                </ol>
               </div>
 
               <div className="rounded-2xl border border-zinc-200 bg-white p-6">
@@ -2217,6 +2437,51 @@ function AnalysisWorkspace({
                   </p>
                 </div>
               </div>
+
+              {sourceWebsites.length > 0 && (
+                <div className="mb-6">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    Research websites
+                  </h3>
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                    {sourceWebsites.map((site) => (
+                      <a
+                        key={site.domain}
+                        className="group flex items-center gap-3 rounded-xl border border-zinc-100 bg-zinc-50/60 px-3 py-2.5 transition-colors hover:border-violet-200 hover:bg-violet-50/40"
+                        href={site.websiteUrl}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        <SourcePlatformIcon platform={site.platform} />
+                        <img
+                          src={site.iconUrl}
+                          alt={`${site.domain} icon`}
+                          className="h-5 w-5 shrink-0 rounded"
+                          loading="lazy"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-medium text-zinc-800 group-hover:text-violet-700">
+                            {site.domain}
+                          </p>
+                          <p className="text-[11px] text-zinc-500">{toSourceLabel(site.platform)}</p>
+                        </div>
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 12 12"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.4"
+                          className="ml-auto shrink-0 text-zinc-300 transition-colors group-hover:text-violet-400"
+                        >
+                          <path d="M2 10L10 2M5 2h5v5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      </a>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               <div className="space-y-2">
                 {sourceItems.length === 0 ? (
                   <p className="text-sm text-zinc-400">No sources recorded for this analysis.</p>
@@ -2378,8 +2643,73 @@ function ProtectedShell({ isAuthenticated }: { isAuthenticated: boolean }) {
   return <Outlet />
 }
 
+function SettingsPage({ accountLabel }: { accountLabel: string }) {
+  const navigate = useNavigate()
+  const [loggingOut, setLoggingOut] = useState(false)
+  const [logoutError, setLogoutError] = useState('')
+
+  async function handleLogout() {
+    if (loggingOut) return
+    setLoggingOut(true)
+    setLogoutError('')
+    try {
+      await logout()
+      navigate('/auth', { replace: true })
+    } catch {
+      setLogoutError('Unable to logout right now. Please try again.')
+    } finally {
+      setLoggingOut(false)
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8F7F4] px-4 py-8 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-3xl">
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <p className="text-[11px] font-semibold uppercase tracking-widest text-zinc-400">Settings</p>
+            <h1 className="mt-1 text-2xl font-bold tracking-tight text-zinc-900">Profile</h1>
+          </div>
+          <button
+            className="rounded-xl border border-zinc-200 bg-white px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
+            onClick={() => navigate('/dashboard')}
+            type="button"
+          >
+            Back to dashboard
+          </button>
+        </div>
+
+        <div className="rounded-2xl border border-zinc-200 bg-white p-6">
+          <h2 className="text-xs font-semibold uppercase tracking-wider text-zinc-400">Account</h2>
+          <div className="mt-4 rounded-xl border border-zinc-100 bg-zinc-50 px-4 py-3">
+            <p className="text-[11px] text-zinc-500">Signed in as</p>
+            <p className="mt-1 text-sm font-medium text-zinc-800">{accountLabel || 'Unknown account'}</p>
+          </div>
+
+          <div className="mt-6 border-t border-zinc-100 pt-6">
+            <h3 className="text-sm font-semibold text-zinc-900">Session</h3>
+            <p className="mt-1 text-sm text-zinc-500">
+              Logout from this account to switch user or end your current session.
+            </p>
+            <button
+              className="mt-4 rounded-xl bg-zinc-900 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-55"
+              onClick={handleLogout}
+              type="button"
+              disabled={loggingOut}
+            >
+              {loggingOut ? 'Logging out...' : 'Logout'}
+            </button>
+            {logoutError && <p className="mt-2 text-xs text-rose-600">{logoutError}</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function AppRouter() {
   const { reports, saveReport } = useReportsStore()
+  const navigate = useNavigate()
   const [health, setHealth] = useState<'checking' | 'online' | 'offline'>('checking')
   const [reportCards, setReportCards] = useState<AnalysisReportCard[]>([])
   const [authReady, setAuthReady] = useState(false)
@@ -2456,29 +2786,27 @@ function AppRouter() {
 
   return (
     <>
-      <div className="fixed right-4 top-4 z-50 flex items-center gap-2 rounded-full border border-white/10 bg-zinc-900/90 px-3 py-1.5 text-[11px] font-medium text-zinc-400 shadow-lg backdrop-blur-sm">
-        <span className={`h-1.5 w-1.5 rounded-full ${healthDot}`} />
-        API {health}
-        {isAuthenticated && (
-          <>
-            <span className="hidden max-w-40 truncate text-zinc-500 sm:inline">{accountLabel}</span>
-            <button
-              className="rounded-full border border-white/10 px-2 py-0.5 text-[10px] text-zinc-300 transition-colors hover:bg-white/10"
-              onClick={() => {
-                logout().catch(() => {})
-              }}
-              type="button"
-            >
-              Logout
-            </button>
-          </>
-        )}
-      </div>
+      {isAuthenticated && (
+        <button
+          className="fixed right-4 top-4 z-50 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-200 bg-white/90 text-zinc-700 shadow-sm backdrop-blur transition-colors hover:bg-zinc-100"
+          onClick={() => navigate('/settings')}
+          type="button"
+          aria-label="Open settings"
+          title={`Settings (${health})`}
+        >
+          <span className={`absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-white ${healthDot}`} />
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <path d="M12 15.5A3.5 3.5 0 1 0 12 8.5a3.5 3.5 0 0 0 0 7Z" />
+            <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.02.02a2 2 0 1 1-2.83 2.83l-.02-.02a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21a2 2 0 1 1-4 0v-.04a1.7 1.7 0 0 0-1.04-1.56 1.7 1.7 0 0 0-1.87.34l-.02.02a2 2 0 1 1-2.83-2.83l.02-.02A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1.04H3a2 2 0 1 1 0-4h.04A1.7 1.7 0 0 0 4.6 8.4a1.7 1.7 0 0 0-.34-1.87l-.02-.02A2 2 0 1 1 7.07 3.7l.02.02a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1.04-1.56V2.5a2 2 0 1 1 4 0v.04A1.7 1.7 0 0 0 15.08 4h.04a1.7 1.7 0 0 0 1.87-.34l.02-.02a2 2 0 1 1 2.83 2.83l-.02.02a1.7 1.7 0 0 0-.34 1.87V8.4A1.7 1.7 0 0 0 21 9.44H21a2 2 0 1 1 0 4h-.04A1.7 1.7 0 0 0 19.4 15Z" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
       <Routes>
         <Route element={isAuthenticated ? <Navigate replace to="/" /> : <AuthPage />} path="/auth" />
         <Route element={<ProtectedShell isAuthenticated={isAuthenticated} />}>
           <Route element={<LandingPage />} path="/" />
           <Route element={<DashboardPage reportCards={reportCards} />} path="/dashboard" />
+          <Route element={<SettingsPage accountLabel={accountLabel} />} path="/settings" />
           <Route element={<WizardPage saveReport={saveReport} />} path="/analysis/new" />
           <Route
             element={<AnalysisWorkspace reports={reports} saveReport={saveReport} />}

@@ -46,6 +46,13 @@ export type SourceReference = {
   snippet: string
 }
 
+export type ResearchWebsite = {
+  domain: string
+  websiteUrl: string
+  platform: SourcePlatform
+  iconUrl: string
+}
+
 export type MarketSignal = {
   demandScore: number
   trendSignals: string[]
@@ -103,6 +110,7 @@ export type AnalysisReport = {
   actionPlan: string[]
   investorNarrative: string
   sources?: SourceReference[]
+  sourceWebsites?: ResearchWebsite[]
   rawSources: string[]
 }
 
@@ -125,4 +133,20 @@ export type FeedbackPayload = {
     viability?: number
     risk?: number
   }
+}
+
+export type ReportChatMessage = {
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+}
+
+export type ReportChatRequest = {
+  requestId: string
+  message: string
+}
+
+export type ReportChatResponse = {
+  answer: string
+  messages: ReportChatMessage[]
 }
